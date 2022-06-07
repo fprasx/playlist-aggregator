@@ -1,7 +1,11 @@
-use std::collections::HashSet;
 use futures_util::StreamExt;
 use rspotify::model::PlayableItem::{Episode, Track};
-use rspotify::{prelude::*, scopes, AuthCodeSpotify, Credentials, OAuth};
+use rspotify::{
+    prelude::*, scopes, AuthCodeSpotify, Config, Credentials, OAuth, DEFAULT_API_PREFIX,
+    DEFAULT_CACHE_PATH, DEFAULT_PAGINATION_CHUNKS,
+};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +18,15 @@ async fn main() {
     ))
     .unwrap();
 
-    let mut spotify = AuthCodeSpotify::new(creds, oauth);
+    let config = Config {
+        prefix: DEFAULT_API_PREFIX.to_owned(),
+        cache_path: PathBuf::from(DEFAULT_CACHE_PATH),
+        pagination_chunks: DEFAULT_PAGINATION_CHUNKS,
+        token_cached: true,
+        token_refreshing: true,
+    };
+
+    let mut spotify = AuthCodeSpotify::with_config(creds, oauth, config);
 
     // Obtaining the access token
     let url = spotify.get_authorize_url(false).unwrap();
