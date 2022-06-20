@@ -145,7 +145,7 @@ async fn get_all_tracks(spotify: &AuthCodePkceSpotify) -> HashSet<TrackId> {
     get_tracks_from_liked_songs(spotify, &mut tracks).await;
     cprintln(H.repeat(56), RED);
     println!(
-        "{:<40} {GREEN}{} {YELLOW} ~{}{RESET}",
+        "{:<40} {GREEN}{:04} {YELLOW}~{}{RESET}",
         "Total",
         tracks.len(),
         format_time_from_secs(playlists_dur.as_secs() as usize)
