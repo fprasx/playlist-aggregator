@@ -10,3 +10,5 @@ tokio = { version = "1.19.2", features = ["macros", "rt-multi-thread"] }
 rspotify = { version = "0.11.5", features = ["env-file", "cli"] }
 futures-util = "0.3.21"
 chrono = "0.4"
+anyhow = { version = "1.0", features = ["std"] }
+env_logger = "0.9.0"
