@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 
 use rspotify::model::{
     PlayableItem::{Episode, Track},
-    PlaylistId, TrackId,
+    PlaylistId, TrackId, UserId,
 };
 use rspotify::{prelude::*, scopes, AuthCodePkceSpotify, Config, Credentials, OAuth};
 
@@ -20,6 +20,10 @@ use std::{
 
 pub mod color;
 
+// Can only add up to 100 tracks at a time (just a hard limit)
+// Also sometimes this errors randomly, I think it's because a url is exceeding 2000 characters
+// So we artifically cap at 50 tracks (lucky number)
+const CHUNK_SIZE: usize = 50;
 const LONG_DASH: &str = "─";
 const CURSOR_LEFT: &str = "\x1B[1000D";
 const CURSOR_HIDE: &str = "\x1B[?25l";
@@ -53,6 +57,8 @@ pub async fn authorize() -> Result<AuthCodePkceSpotify> {
         "playlist-read-private",
         "playlist-modify-public",
         "playlist-modify-private"
+        //
+        //
     ))
     .unwrap();
 
@@ -85,9 +91,9 @@ fn read_from_stdin(prompt: impl Display) -> String {
 
     io::stdin()
         .read_line(&mut name)
-        .expect("{RED}failed to read name from stdin{RESET}");
+        .expect("{RED}failed to read from stdin{RESET}");
 
-    name.trim().to_owned()
+    name.trim().to_owned().to_lowercase()
 }
 
 async fn get_user_playlists(spotify: &impl OAuthClient) -> HashMap<String, PlaylistId> {
@@ -125,7 +131,9 @@ pub async fn create_playlist(
             println!("{YELLOW}Proceeding with overwrite.{RESET}");
             let id = names.get(&name).unwrap();
             // Update the description
-            spotify.playlist_change_detail(id, None, None, description, None).await?;
+            spotify
+                .playlist_change_detail(id, None, None, description, None)
+                .await?;
             return Ok((id.clone(), name));
         } else {
             // Else, reprompt for a name
@@ -139,22 +147,20 @@ pub async fn create_playlist(
         Some(resp == "y" || resp == "yes")
     };
 
-    // Should the new playlist be collaborative
-    let collaborative = {
-        let resp = read_from_stdin("Do you want to the playlist to be collaborative? [y/n]");
-        Some(resp == "y" || resp == "yes")
-    };
-
     // Make the playlist
-    let id = &spotify.me().await.context("error getting user id")?.id;
+    let id = &spotify
+        .me()
+        .await
+        .context("error getting user id, don't forget to add user in spotify developer dashboard")?
+        .id;
 
     // Return the id of the newly created playlist
     let id = spotify
-        .user_playlist_create(id, &name, public, collaborative, description)
+        .user_playlist_create(id, &name, public, Some(false), description)
         .await
         .map_err(Error::from)
         .map(|p| (p.id, name.clone()))
-        .context("failed to create playlist {}");
+        .context("failed to create playlist");
 
     println!("{YELLOW}Created playlist <{GREEN}{name}{YELLOW}>{RESET}");
 
@@ -233,6 +239,7 @@ async fn playlist_summary(spotify: &impl BaseClient, id: &PlaylistId) -> Playlis
         // Failed at column 44
         let inner = match item.track {
             Some(track) => track,
+            // TODO: maybe log this
             None => continue,
         };
 
@@ -257,12 +264,14 @@ async fn get_tracks_from_playlists(
 ) -> Runtime {
     let mut total_duration: Duration = Duration::from_secs(0);
 
-    println!("{:<39}Tracks    h  m  s", "");
+    println!("{:<79}Tracks    h  m  s", "");
 
     // Note: cannot include the function call in the while loop condition!!!
     // It will just return the first playlist every time, as it's making a new api call every loop iteration
     let mut playlists = spotify.current_user_playlists();
     while let Some(Ok(playlist)) = playlists.next().await {
+        // TODO: check playlist id
+        
         // For each playlist, print out a nice message
         let PlaylistSummary {
             num_tracks,
@@ -271,7 +280,7 @@ async fn get_tracks_from_playlists(
 
         // TODO: Can't get padding right with brackets
         println!(
-            "{CYAN}{:<40}{RESET} {GREEN}{:04}{RESET}  {YELLOW}{}{RESET}",
+            "{CYAN}{:<80}{RESET} {GREEN}{:04}{RESET}  {YELLOW}{}{RESET}",
             playlist.name, num_tracks, duration
         );
 
@@ -284,7 +293,10 @@ async fn get_tracks_from_playlists(
                 _ => continue,
             };
             if let Track(t) = t {
-                if found.insert(t.id.unwrap()) {
+                if found.insert(match t.id {
+                    Some(id) => id,
+                    None => continue
+                }) {
                     // If the track wasn't found before, add its duration to the total
                     total_duration = total_duration.checked_add(t.duration).unwrap();
                 }
@@ -335,44 +347,57 @@ pub async fn add_tracks_to_playlist(
         .await
         .context(format!("failed to clear playlist {name}"))?;
 
-    // Can only add up to 100 tracks at a time (just a hard limit)
-    // Also sometimes this errors randomly, I think it's because a url is exceeding 2000 characters
-    // So we artifically cap at 88 tracks (lucky number)
-    //
-    // TODO: add progress bar
+    // Defere error handling until all tracks have been (hopefully) added
+    let mut errs = vec![];
+
     let mut added = 0;
-    for chunk in tracks.chunks(88) {
+    for chunk in tracks.chunks(CHUNK_SIZE) {
         match spotify
             .playlist_add_items(p, chunk.iter().map(|t| t as &dyn PlayableId), None)
             .await
         {
             Ok(_) => {
-                added += 88;
+                added += CHUNK_SIZE;
                 // Number of equal signs to put
                 // Truncate it down if it exceeds 40 (the largest number of equal signs)
                 let fill = cmp::min(40 * added / tracks.len(), 40);
                 print!(
                     "{CURSOR_HIDE}{CURSOR_LEFT}{CYAN}[{RESET}{}>{}{CYAN}]{RESET}",
-                    "=".repeat(fill - 1),
+                    "=".repeat(fill.saturating_sub(1)),
                     " ".repeat(40 - fill)
                 );
                 // Not a big deal if we fail to flush
                 let _ = io::stdout().flush();
             }
             Err(e) => {
-                let error = Error::from(e).context("failed to add a chunk of tracks");
-                match spotify.playlist_unfollow(p).await {
-                    Ok(_) => println!("Deleted <Test from Rust>!"),
-                    Err(_) => {
-                        // Restore the cursor
-                        println!("{CURSOR_SHOW}");
-                        return Err(error.context("failed to delete playlist as part of cleanup"));
-                    }
-                }
+                let error = Error::from(e).context(
+                    "failed to add a chunk of tracks, you might want to delete the playlist",
+                );
+                errs.push(error);
             }
         }
     }
 
+    // Handle all errors now
+    if !errs.is_empty() {
+        for err in errs {
+            println!("{err}");
+        }
+        let delete = read_from_stdin(
+            "Do you want to delete the playlist, since some tracks might be missing? [y/n]",
+        );
+        if delete == "y" || delete == "yes" {
+            match spotify.playlist_unfollow(p).await {
+                Ok(_) => println!("Deleted test from Rus<t>!"),
+                Err(e) => {
+                    // Restore the cursor
+                    println!("{CURSOR_SHOW}");
+                    return Err(anyhow::Error::from(e)
+                        .context("failed to delete playlist as part of cleanup"));
+                }
+            }
+        }
+    }
     // Restore the cursor, finish printing the bar
     println!(
         "{CURSOR_LEFT}{CYAN}[{RESET}{}{CYAN}]{RESET}{CURSOR_SHOW}",
