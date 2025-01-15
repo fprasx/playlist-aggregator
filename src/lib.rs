@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 
 use rspotify::model::{
     PlayableItem::{Episode, Track},
-    PlaylistId, TrackId, UserId,
+    PlaylistId, TrackId,
 };
 use rspotify::{prelude::*, scopes, AuthCodePkceSpotify, Config, Credentials, OAuth};
 
@@ -56,9 +56,8 @@ pub async fn authorize() -> Result<AuthCodePkceSpotify> {
         "playlist-read-collaborative",
         "playlist-read-private",
         "playlist-modify-public",
-        "playlist-modify-private"
-        //
-        //
+        "playlist-modify-private" //
+                                  //
     ))
     .unwrap();
 
@@ -111,10 +110,10 @@ async fn get_user_playlists(spotify: &impl OAuthClient) -> HashMap<String, Playl
 // Create a new playlist
 //
 // Returns an error if a playlist with the same name already exists
-pub async fn create_playlist(
-    spotify: &impl OAuthClient,
+pub async fn create_playlist<'a>(
+    spotify: &'a impl OAuthClient,
     description: Option<&str>,
-) -> Result<(PlaylistId, String)> {
+) -> Result<(PlaylistId<'a>, String)> {
     let names = get_user_playlists(spotify).await;
 
     let mut name = read_from_stdin("What would you like your playlist to be called?");
@@ -132,7 +131,7 @@ pub async fn create_playlist(
             let id = names.get(&name).unwrap();
             // Update the description
             spotify
-                .playlist_change_detail(id, None, None, description, None)
+                .playlist_change_detail(id.clone(), None, None, description, None)
                 .await?;
             return Ok((id.clone(), name));
         } else {
@@ -156,7 +155,7 @@ pub async fn create_playlist(
 
     // Return the id of the newly created playlist
     let id = spotify
-        .user_playlist_create(id, &name, public, Some(false), description)
+        .user_playlist_create(id.clone(), &name, public, Some(false), description)
         .await
         .map_err(Error::from)
         .map(|p| (p.id, name.clone()))
@@ -210,7 +209,7 @@ impl Display for Runtime {
 // Get all tracks from liked songs, return their combined length
 async fn get_tracks_from_liked_songs(
     spotify: &impl OAuthClient,
-    found: &mut HashSet<TrackId>,
+    found: &mut HashSet<TrackId<'_>>,
 ) -> Runtime {
     let mut duration = Duration::from_secs(0);
 
@@ -220,17 +219,19 @@ async fn get_tracks_from_liked_songs(
 
     while let Some(Ok(t)) = saved_tracks.next().await {
         found.insert(t.track.id.unwrap());
-        duration = duration.checked_add(t.track.duration).unwrap();
+        duration = duration
+            .checked_add(t.track.duration.to_std().unwrap())
+            .unwrap();
     }
     duration.into()
 }
 
 // Return the number of tracks and duration of a playlist
-async fn playlist_summary(spotify: &impl BaseClient, id: &PlaylistId) -> PlaylistSummary {
+async fn playlist_summary(spotify: &impl BaseClient, id: &PlaylistId<'_>) -> PlaylistSummary {
     let mut num_tracks = 0;
     let mut duration: Duration = Duration::from_secs(0);
 
-    let mut p = spotify.playlist_items(id, None, None);
+    let mut p = spotify.playlist_items(id.clone(), None, None);
 
     // Paginate through the items
     while let Some(Ok(item)) = p.next().await {
@@ -245,7 +246,7 @@ async fn playlist_summary(spotify: &impl BaseClient, id: &PlaylistId) -> Playlis
 
         duration = duration
             .checked_add(match inner {
-                Track(t) => t.duration,
+                Track(t) => t.duration.to_std().unwrap(),
                 Episode(_) => Duration::from_secs(0),
             })
             .unwrap(); // You would need to have a very long playlist to overflow
@@ -260,7 +261,7 @@ async fn playlist_summary(spotify: &impl BaseClient, id: &PlaylistId) -> Playlis
 // Get all tracks from playlists
 async fn get_tracks_from_playlists(
     spotify: &impl OAuthClient,
-    found: &mut HashSet<TrackId>,
+    found: &mut HashSet<TrackId<'_>>,
 ) -> Runtime {
     let mut total_duration: Duration = Duration::from_secs(0);
 
@@ -271,7 +272,7 @@ async fn get_tracks_from_playlists(
     let mut playlists = spotify.current_user_playlists();
     while let Some(Ok(playlist)) = playlists.next().await {
         // TODO: check playlist id
-        
+
         // For each playlist, print out a nice message
         let PlaylistSummary {
             num_tracks,
@@ -284,7 +285,7 @@ async fn get_tracks_from_playlists(
             playlist.name, num_tracks, duration
         );
 
-        let mut items = spotify.playlist_items(&playlist.id, None, None);
+        let mut items = spotify.playlist_items(playlist.id, None, None);
 
         // Paginate through the tracks
         while let Some(Ok(item)) = items.next().await {
@@ -295,10 +296,12 @@ async fn get_tracks_from_playlists(
             if let Track(t) = t {
                 if found.insert(match t.id {
                     Some(id) => id,
-                    None => continue
+                    None => continue,
                 }) {
                     // If the track wasn't found before, add its duration to the total
-                    total_duration = total_duration.checked_add(t.duration).unwrap();
+                    total_duration = total_duration
+                        .checked_add(t.duration.to_std().unwrap())
+                        .unwrap();
                 }
             }
         }
@@ -337,13 +340,13 @@ pub async fn get_all_tracks(spotify: &AuthCodePkceSpotify) -> Vec<TrackId> {
 
 pub async fn add_tracks_to_playlist(
     spotify: &impl OAuthClient,
-    p: &PlaylistId,
-    tracks: Vec<TrackId>,
+    p: &PlaylistId<'_>,
+    tracks: Vec<TrackId<'_>>,
     name: String,
 ) -> Result<()> {
     // Clear the playlist first in case we're overwriting
     spotify
-        .playlist_replace_items(p, [])
+        .playlist_replace_items(p.clone(), [])
         .await
         .context(format!("failed to clear playlist {name}"))?;
 
@@ -353,7 +356,11 @@ pub async fn add_tracks_to_playlist(
     let mut added = 0;
     for chunk in tracks.chunks(CHUNK_SIZE) {
         match spotify
-            .playlist_add_items(p, chunk.iter().map(|t| t as &dyn PlayableId), None)
+            .playlist_add_items(
+                p.clone(),
+                chunk.iter().map(|t| PlayableId::Track(t.clone())),
+                None,
+            )
             .await
         {
             Ok(_) => {
@@ -387,7 +394,7 @@ pub async fn add_tracks_to_playlist(
             "Do you want to delete the playlist, since some tracks might be missing? [y/n]",
         );
         if delete == "y" || delete == "yes" {
-            match spotify.playlist_unfollow(p).await {
+            match spotify.playlist_unfollow(p.clone()).await {
                 Ok(_) => println!("Deleted test from Rus<t>!"),
                 Err(e) => {
                     // Restore the cursor
